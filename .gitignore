@@ -1,0 +1,18 @@
+# Compiled binary
+sss_server
+sss_server_debug
+
+# Object files
+*.o
+
+# Log files
+*.log
+
+# Form submissions (runtime data)
+submissions/
+
+# Editor temp files
+*~
+*.swp
+*.swo
+.vscode/
