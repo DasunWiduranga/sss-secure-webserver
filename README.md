@@ -1,7 +1,6 @@
 # sss-secure-webserver
-================================================================================
+
 SSS Secure Web Server --- Compile Instructions
-================================================================================
 
 Platform: Linux (Fedora VM as provided) Language: C++17 Compiler: GCC
 (g++) or Clang (clang++)
@@ -85,4 +84,4 @@ Debug build (with sanitizers):
     # Test HEAD request
     curl -I http://localhost:8080/
 
-================================================================================
+
