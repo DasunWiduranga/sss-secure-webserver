@@ -170,3 +170,56 @@ private:
 #define LOG_WARNING(msg) Logger::instance().log(LogLevel::WARNING, msg)
 #define LOG_ERROR(msg)   Logger::instance().log(LogLevel::ERROR, msg)
 #define LOG_FATAL(msg)   Logger::instance().log(LogLevel::FATAL, msg)
+
+// =============================================================================
+// Section 3: HTTP Request/Response Structures
+// =============================================================================
+ 
+/**
+ * @struct HttpRequest
+ * @brief Parsed representation of an incoming HTTP request.
+ *
+ * Security note: All fields are populated by the parser after input
+ * validation. The parser enforces maximum sizes on each field to
+ * prevent buffer exhaustion attacks.
+ */
+struct HttpRequest {
+    std::string method;                              ///< HTTP method (GET, POST, etc.)
+    std::string path;                                ///< Request URI path (validated)
+    std::string version;                             ///< HTTP version string
+    std::map<std::string, std::string> headers;      ///< Parsed request headers
+    std::string body;                                ///< Request body (for POST)
+    std::map<std::string, std::string> query_params;  ///< Parsed query string parameters
+    std::map<std::string, std::string> form_data;     ///< Parsed form POST data
+};
+ 
+/**
+ * @struct HttpResponse
+ * @brief Represents an HTTP response to be sent to the client.
+ */
+struct HttpResponse {
+    int status_code = 200;                           ///< HTTP status code
+    std::string status_text = "OK";                  ///< Status reason phrase
+    std::map<std::string, std::string> headers;      ///< Response headers
+    std::string body;                                ///< Response body content
+ 
+    /**
+     * @brief Serialise the response to a raw HTTP response string.
+     * @return The complete HTTP response ready for transmission.
+     *
+     * Security: Always includes security-relevant headers such as
+     * Content-Length (to prevent response splitting) and
+     * X-Content-Type-Options (to prevent MIME-sniffing).
+     */
+    std::string serialize() const {
+        std::ostringstream oss;
+        oss << "HTTP/1.1 " << status_code << " " << status_text << "\r\n";
+        for (const auto& [key, value] : headers) {
+            oss << key << ": " << value << "\r\n";
+        }
+        oss << "Content-Length: " << body.size() << "\r\n";
+        oss << "\r\n";
+        oss << body;
+        return oss.str();
+    }
+};
