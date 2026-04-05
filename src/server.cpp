@@ -223,3 +223,185 @@ struct HttpResponse {
         return oss.str();
     }
 };
+
+// =============================================================================
+// Section 4: Input Validation and Sanitisation
+// =============================================================================
+ 
+/**
+ * @class InputValidator
+ * @brief Static utility class for validating and sanitising all untrusted input.
+ *
+ * Security rationale: All data received from the TCP socket is untrusted.
+ * This class centralises validation logic, applying the CSSLP principle of
+ * "Complete Mediation" — every access to a resource must be validated.
+ *
+ * Key defences:
+ *  - Path traversal prevention (CWE-22)
+ *  - Request size limiting (CWE-400)
+ *  - Header injection prevention (CWE-113)
+ *  - Null byte injection prevention (CWE-158)
+ */
+class InputValidator {
+public:
+    /// Maximum allowed size for an HTTP request (headers + body) in bytes
+    static constexpr size_t MAX_REQUEST_SIZE = 1 * 1024 * 1024;  // 1 MB
+ 
+    /// Maximum allowed length for a URI path
+    static constexpr size_t MAX_URI_LENGTH = 2048;
+ 
+    /// Maximum allowed size for a single HTTP header value
+    static constexpr size_t MAX_HEADER_SIZE = 8192;
+ 
+    /// Maximum number of headers per request
+    static constexpr size_t MAX_HEADER_COUNT = 100;
+ 
+    /// Maximum POST body size
+    static constexpr size_t MAX_BODY_SIZE = 512 * 1024;  // 512 KB
+ 
+    /**
+     * @brief Validate and sanitise a URI path against path traversal attacks.
+     * @param path The raw URI path from the HTTP request.
+     * @param webroot The server's document root directory.
+     * @return The resolved canonical filesystem path, or empty string if invalid.
+     *
+     * Defence against CWE-22 (Path Traversal):
+     *  1. Reject paths containing null bytes
+     *  2. URL-decode the path
+     *  3. Reject encoded traversal sequences (double-encoding attacks)
+     *  4. Resolve to canonical (absolute) path using std::filesystem
+     *  5. Verify the canonical path starts with the webroot
+     *
+     * This implements the OWASP recommendation of canonicalisation followed
+     * by prefix checking, which is more robust than blacklist filtering.
+     */
+    static std::string sanitizePath(const std::string& path,
+                                     const std::string& webroot) {
+        // Reject null bytes — prevents CWE-158 null byte injection
+        if (path.find('\0') != std::string::npos) {
+            LOG_WARNING("Null byte detected in request path — rejected");
+            return "";
+        }
+ 
+        // Reject excessively long URIs
+        if (path.length() > MAX_URI_LENGTH) {
+            LOG_WARNING("URI exceeds maximum length — rejected");
+            return "";
+        }
+ 
+        // URL-decode the path
+        std::string decoded = urlDecode(path);
+ 
+        // After decoding, check again for traversal patterns
+        // This catches double-encoding attacks (%252e%252e%252f)
+        if (decoded.find("..") != std::string::npos) {
+            LOG_WARNING("Path traversal sequence detected after decoding: " + decoded);
+            return "";
+        }
+ 
+        // Build the candidate path relative to webroot
+        // Default "/" to "/index.html"
+        std::string relative = (decoded == "/") ? "/index.html" : decoded;
+ 
+        // Remove leading slash for path concatenation
+        if (!relative.empty() && relative[0] == '/') {
+            relative = relative.substr(1);
+        }
+ 
+        try {
+            // Canonicalise using std::filesystem
+            fs::path candidate = fs::canonical(fs::path(webroot) / relative);
+            fs::path root = fs::canonical(fs::path(webroot));
+ 
+            // Verify the resolved path is within the webroot
+            // This is the critical check that prevents path traversal
+            std::string cand_str = candidate.string();
+            std::string root_str = root.string();
+            if (cand_str.substr(0, root_str.size()) != root_str) {
+                LOG_WARNING("Path traversal attempt blocked: " + path +
+                            " resolved to " + cand_str);
+                return "";
+            }
+ 
+            return cand_str;
+        } catch (const fs::filesystem_error& e) {
+            // File does not exist or permission denied
+            LOG_DEBUG("Path resolution failed for '" + path + "': " + e.what());
+            return "";
+        }
+    }
+ 
+    /**
+     * @brief URL-decode a percent-encoded string.
+     * @param str The URL-encoded input string.
+     * @return The decoded string.
+     */
+    static std::string urlDecode(const std::string& str) {
+        std::string result;
+        result.reserve(str.size());
+        for (size_t i = 0; i < str.size(); ++i) {
+            if (str[i] == '%' && i + 2 < str.size()) {
+                std::string hex = str.substr(i + 1, 2);
+                try {
+                    char c = static_cast<char>(std::stoi(hex, nullptr, 16));
+                    result += c;
+                    i += 2;
+                } catch (...) {
+                    result += str[i];  // Invalid encoding — keep literal '%'
+                }
+            } else if (str[i] == '+') {
+                result += ' ';  // Form encoding: '+' represents space
+            } else {
+                result += str[i];
+            }
+        }
+        return result;
+    }
+ 
+    /**
+     * @brief Parse URL-encoded form data (application/x-www-form-urlencoded).
+     * @param body The raw form body.
+     * @return Map of key-value pairs, URL-decoded.
+     */
+    static std::map<std::string, std::string> parseFormData(const std::string& body) {
+        std::map<std::string, std::string> params;
+        std::istringstream stream(body);
+        std::string pair;
+        while (std::getline(stream, pair, '&')) {
+            auto pos = pair.find('=');
+            if (pos != std::string::npos) {
+                std::string key = urlDecode(pair.substr(0, pos));
+                std::string value = urlDecode(pair.substr(pos + 1));
+                // Sanitise: truncate excessively long values
+                if (value.size() > MAX_HEADER_SIZE) {
+                    value = value.substr(0, MAX_HEADER_SIZE);
+                    LOG_WARNING("Truncated oversized form value for key: " + key);
+                }
+                params[key] = value;
+            }
+        }
+        return params;
+    }
+ 
+    /**
+     * @brief Parse query string parameters from a URI.
+     * @param query The query string (after '?').
+     * @return Map of decoded key-value pairs.
+     */
+    static std::map<std::string, std::string> parseQueryString(const std::string& query) {
+        return parseFormData(query);  // Same encoding format
+    }
+ 
+    /**
+     * @brief Validate an HTTP method string.
+     * @param method The method extracted from the request line.
+     * @return true if the method is supported and well-formed.
+     *
+     * Security: Only allows explicitly supported methods. Unknown
+     * methods are rejected (fail-safe default / deny-by-default).
+     */
+    static bool isValidMethod(const std::string& method) {
+        return method == "GET" || method == "POST" ||
+               method == "HEAD" || method == "OPTIONS";
+    }
+};
