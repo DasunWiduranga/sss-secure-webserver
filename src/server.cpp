@@ -510,3 +510,51 @@ public:
  
         return buildErrorResponse(405, "Method Not Allowed");
     }
+
+    /**
+     * @brief Build an HTML error response.
+     * @param code The HTTP status code.
+     * @param text The status reason phrase.
+     * @return An HttpResponse with a safe error page.
+     *
+     * Security: Error pages are static HTML templates that do not
+     * reflect any user input (prevents reflected XSS via error pages).
+     */
+    HttpResponse buildErrorResponse(int code, const std::string& text) {
+        HttpResponse response;
+        response.status_code = code;
+        response.status_text = text;
+        response.headers["Content-Type"] = "text/html";
+        response.body =
+            "<!DOCTYPE html><html><head><title>" + std::to_string(code) +
+            " " + text + "</title></head>"
+            "<body><h1>" + std::to_string(code) + " " + text + "</h1>"
+            "</body></html>";
+        addSecurityHeaders(response);
+        return response;
+    }
+
+    /**
+     * @brief Add security-relevant HTTP headers to a response.
+     * @param response The response to augment.
+     *
+     * Headers applied (defence in depth):
+     *  - X-Content-Type-Options: nosniff — prevent MIME-sniffing
+     *  - X-Frame-Options: DENY — prevent clickjacking
+     *  - X-XSS-Protection: 0 — modern recommendation (CSP preferred)
+     *  - Content-Security-Policy: restrict resource loading
+     *  - Referrer-Policy: limit referrer information leakage
+     *  - Server: generic banner (information hiding)
+     */
+    void addSecurityHeaders(HttpResponse& response) {
+        response.headers["X-Content-Type-Options"] = "nosniff";
+        response.headers["X-Frame-Options"] = "DENY";
+        response.headers["X-XSS-Protection"] = "0";
+        response.headers["Content-Security-Policy"] = "default-src 'self'";
+        response.headers["Referrer-Policy"] = "no-referrer";
+        response.headers["Server"] = "SSS-Secure/1.0";
+    }
+
+    std::string webroot_;          ///< Document root directory
+    std::string submissions_dir_;  ///< Form submission storage directory
+};
