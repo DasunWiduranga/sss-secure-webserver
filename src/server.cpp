@@ -405,3 +405,108 @@ public:
                method == "HEAD" || method == "OPTIONS";
     }
 };
+
+// =============================================================================
+// Section 6: MIME Type Detection
+// =============================================================================
+ 
+/**
+ * @class MimeTypes
+ * @brief Maps file extensions to MIME type strings.
+ *
+ * Security note: Correct MIME typing prevents browsers from
+ * misinterpreting content. Combined with X-Content-Type-Options: nosniff,
+ * this mitigates content-type sniffing attacks (CWE-16).
+ */
+class MimeTypes {
+public:
+    /**
+     * @brief Determine the MIME type for a file based on its extension.
+     * @param path The filesystem path to the file.
+     * @return The MIME type string; defaults to "application/octet-stream".
+     */
+    static std::string getType(const std::string& path) {
+        static const std::map<std::string, std::string> types = {
+            {".html", "text/html"},
+            {".htm",  "text/html"},
+            {".css",  "text/css"},
+            {".js",   "application/javascript"},
+            {".json", "application/json"},
+            {".png",  "image/png"},
+            {".jpg",  "image/jpeg"},
+            {".jpeg", "image/jpeg"},
+            {".gif",  "image/gif"},
+            {".svg",  "image/svg+xml"},
+            {".ico",  "image/x-icon"},
+            {".txt",  "text/plain"},
+            {".pdf",  "application/pdf"},
+            {".xml",  "application/xml"},
+            {".woff", "font/woff"},
+            {".woff2","font/woff2"},
+        };
+ 
+        fs::path p(path);
+        std::string ext = p.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+ 
+        auto it = types.find(ext);
+        if (it != types.end()) {
+            return it->second;
+        }
+        // Default: binary stream — safest default (prevents execution)
+        return "application/octet-stream";
+    }
+};
+
+// =============================================================================
+// Section 8: Request Router and Response Builder
+// =============================================================================
+ 
+/**
+ * @class RequestHandler
+ * @brief Routes HTTP requests and constructs appropriate responses.
+ *
+ * Security design:
+ *  - All file serving goes through InputValidator::sanitizePath()
+ *  - Security headers are added to every response (defence in depth)
+ *  - Error responses reveal minimal information (fail-safe defaults)
+ *  - POST form handling is delegated to the sandboxed FormHandler
+ */
+class RequestHandler {
+public:
+    /**
+     * @brief Construct a RequestHandler with the specified webroot.
+     * @param webroot The document root directory for serving files.
+     */
+    explicit RequestHandler(const std::string& webroot)
+        : webroot_(webroot),
+          submissions_dir_(webroot + "/../submissions") {}
+ 
+    /**
+     * @brief Process an HTTP request and produce a response.
+     * @param request The parsed HTTP request.
+     * @return An HttpResponse ready for serialisation.
+     */
+    HttpResponse handleRequest(const HttpRequest& request) {
+        HttpResponse response;
+        addSecurityHeaders(response);
+ 
+        if (request.method.empty()) {
+            return buildErrorResponse(400, "Bad Request");
+        }
+ 
+        // Route based on HTTP method
+        if (request.method == "GET" || request.method == "HEAD") {
+            return handleGet(request);
+        } else if (request.method == "POST") {
+            return handlePost(request);
+        } else if (request.method == "OPTIONS") {
+            response.status_code = 200;
+            response.status_text = "OK";
+            response.headers["Allow"] = "GET, POST, HEAD, OPTIONS";
+            addSecurityHeaders(response);
+            return response;
+        }
+ 
+        return buildErrorResponse(405, "Method Not Allowed");
+    }
