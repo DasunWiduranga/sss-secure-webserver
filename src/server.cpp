@@ -511,6 +511,95 @@ public:
         return buildErrorResponse(405, "Method Not Allowed");
     }
 
+private:
+    /**
+     * @brief Handle a GET request by serving the requested file.
+     * @param request The parsed GET request.
+     * @return An HttpResponse containing the file contents or an error.
+     */
+    HttpResponse handleGet(const HttpRequest& request) {
+        // Validate and resolve the file path (path traversal defence)
+        std::string filepath = InputValidator::sanitizePath(request.path, webroot_);
+
+        if (filepath.empty()) {
+            LOG_INFO("404: " + request.path);
+            return buildErrorResponse(404, "Not Found");
+        }
+
+        // Verify the file exists and is a regular file (not a directory/device)
+        if (!fs::exists(filepath) || !fs::is_regular_file(filepath)) {
+            LOG_INFO("404 (not regular file): " + request.path);
+            return buildErrorResponse(404, "Not Found");
+        }
+
+        // Read the file contents
+        std::ifstream file(filepath, std::ios::binary);
+        if (!file.is_open()) {
+            LOG_ERROR("Failed to open file: " + filepath);
+            return buildErrorResponse(500, "Internal Server Error");
+        }
+
+        std::ostringstream contents;
+        contents << file.rdbuf();
+
+        HttpResponse response;
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.body = contents.str();
+        response.headers["Content-Type"] = MimeTypes::getType(filepath);
+        addSecurityHeaders(response);
+
+        LOG_INFO("200: " + request.path + " (" +
+                 std::to_string(response.body.size()) + " bytes)");
+
+        // For HEAD requests, clear the body but keep headers
+        if (request.method == "HEAD") {
+            response.body.clear();
+        }
+
+        return response;
+    }
+
+    /**
+     * @brief Handle a POST request (form submission).
+     * @param request The parsed POST request.
+     * @return An HttpResponse confirming or denying the submission.
+     *
+     * Form data is processed by FormHandler in a sandboxed child process.
+     * The response contains minimal information to avoid information leakage.
+     */
+    HttpResponse handlePost(const HttpRequest& request) {
+        // Check for form data
+        if (request.form_data.empty() && request.query_params.empty()) {
+            return buildErrorResponse(400, "Bad Request: No form data");
+        }
+
+        // Merge query params and form data (POST body takes precedence)
+        std::map<std::string, std::string> all_data = request.query_params;
+        for (const auto& [key, value] : request.form_data) {
+            all_data[key] = value;
+        }
+
+        // Delegate to sandboxed form handler
+        bool success = FormHandler::handle(all_data, submissions_dir_);
+
+        if (success) {
+            HttpResponse response;
+            response.status_code = 200;
+            response.status_text = "OK";
+            response.headers["Content-Type"] = "text/html";
+            response.body =
+                "<!DOCTYPE html><html><head><title>Submitted</title></head>"
+                "<body><h1>Form Submitted Successfully</h1>"
+                "<p>Your data has been received and stored.</p>"
+                "<a href=\"/\">Return to Home</a></body></html>";
+            addSecurityHeaders(response);
+            return response;
+        } else {
+            return buildErrorResponse(500, "Internal Server Error");
+        }
+    }
+
     /**
      * @brief Build an HTML error response.
      * @param code The HTTP status code.
