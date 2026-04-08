@@ -845,6 +845,76 @@ public:
         // Socket automatically closed here by RAII destructor
     }
 
+private:
+    /**
+     * @brief Read an HTTP request from a socket with size limiting.
+     * @param fd The socket file descriptor to read from.
+     * @return The raw request data, or empty string on failure/timeout.
+     */
+    static std::string readRequest(int fd) {
+        std::string data;
+        char buffer[4096];
+        size_t total_read = 0;
+
+        while (total_read < InputValidator::MAX_REQUEST_SIZE) {
+            ssize_t n = recv(fd, buffer, sizeof(buffer), 0);
+            if (n <= 0) break;  // EOF, error, or timeout
+
+            data.append(buffer, static_cast<size_t>(n));
+            total_read += static_cast<size_t>(n);
+
+            // Check if we've received the complete headers
+            if (data.find("\r\n\r\n") != std::string::npos) {
+                // For requests with a body, check Content-Length
+                auto cl_pos = data.find("Content-Length:");
+                if (cl_pos != std::string::npos) {
+                    auto nl_pos = data.find("\r\n", cl_pos);
+                    if (nl_pos != std::string::npos) {
+                        std::string cl_val = data.substr(cl_pos + 15,
+                                                         nl_pos - cl_pos - 15);
+                        // Trim whitespace
+                        cl_val.erase(0, cl_val.find_first_not_of(" "));
+                        try {
+                            size_t expected = std::stoul(cl_val);
+                            auto body_start = data.find("\r\n\r\n") + 4;
+                            size_t body_received = data.size() - body_start;
+                            if (body_received >= expected) break;
+                            // Continue reading for remaining body
+                            continue;
+                        } catch (...) {
+                            break;  // Invalid Content-Length
+                        }
+                    }
+                }
+                break;  // No body expected
+            }
+        }
+
+        return data;
+    }
+
+    /**
+     * @brief Send all data through a socket, handling partial writes.
+     * @param fd The socket file descriptor.
+     * @param data The data to send.
+     *
+     * Loops on send() to handle short writes, which can occur under
+     * high load or when the kernel send buffer is full.
+     */
+    static void sendAll(int fd, const std::string& data) {
+        size_t total_sent = 0;
+        while (total_sent < data.size()) {
+            ssize_t n = send(fd, data.c_str() + total_sent,
+                            data.size() - total_sent, MSG_NOSIGNAL);
+            if (n < 0) {
+                if (errno == EINTR) continue;  // Interrupted — retry
+                LOG_ERROR("send() failed: " + std::string(std::strerror(errno)));
+                return;
+            }
+            total_sent += static_cast<size_t>(n);
+        }
+    }
+};
 
 // =============================================================================
 // Section 10: Server Core
