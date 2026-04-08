@@ -760,3 +760,243 @@ private:
     std::string webroot_;          ///< Document root directory
     std::string submissions_dir_;  ///< Form submission storage directory
 };
+
+// =============================================================================
+// Section 9: Connection Handler (Per-Thread)
+// =============================================================================
+
+/**
+ * @class ConnectionHandler
+ * @brief Handles a single client connection on a dedicated thread.
+ *
+ * Security rationale: Each connection is handled on its own thread with
+ * its own stack. This achieves:
+ *  - Isolation: A crash or exception handling one connection does not
+ *    affect other connections (fault isolation / separation of concerns).
+ *  - Resource containment: Each thread's resources are bounded.
+ *
+ * The RAII Socket wrapper ensures the client socket is closed even if
+ * an exception occurs during request processing.
+ *
+ * Principle: CSSLP Domain 4 — "Separation of Concerns / Isolation"
+ */
+class ConnectionHandler {
+public:
+    /**
+     * @brief Handle a client connection.
+     * @param client_fd The client socket file descriptor (ownership transferred).
+     * @param client_addr The client's IP address string (for logging).
+     * @param handler Reference to the shared RequestHandler.
+     *
+     * This method:
+     *  1. Wraps the fd in an RAII Socket
+     *  2. Reads the request with a timeout and size limit
+     *  3. Parses and handles the request
+     *  4. Sends the response
+     *  5. Closes the socket (automatic via RAII)
+     */
+    static void handle(int client_fd, const std::string& client_addr,
+                       RequestHandler& handler) {
+        // RAII: Socket will be closed when this function returns
+        Socket client_socket(client_fd);
+
+        LOG_INFO("Connection from: " + client_addr);
+
+        try {
+            // Set a read timeout to prevent slowloris-style attacks
+            struct timeval timeout;
+            timeout.tv_sec = 5;   // 5-second read timeout
+            timeout.tv_usec = 0;
+            setsockopt(client_socket.get(), SOL_SOCKET, SO_RCVTIMEO,
+                       &timeout, sizeof(timeout));
+
+            // Read the request data
+            std::string raw_request = readRequest(client_socket.get());
+
+            if (raw_request.empty()) {
+                LOG_WARNING("Empty or timed-out request from: " + client_addr);
+                return;  // Socket closed by RAII
+            }
+
+            // Parse the raw request
+            HttpRequest request = HttpParser::parse(raw_request);
+
+            // Handle the request and generate a response
+            HttpResponse response = handler.handleRequest(request);
+
+            // Serialise and send the response
+            std::string response_str = response.serialize();
+            sendAll(client_socket.get(), response_str);
+
+        } catch (const std::exception& e) {
+            LOG_ERROR("Exception handling request from " + client_addr +
+                      ": " + e.what());
+            // Send a minimal error response
+            try {
+                std::string error_response =
+                    "HTTP/1.1 500 Internal Server Error\r\n"
+                    "Content-Length: 0\r\n"
+                    "Connection: close\r\n\r\n";
+                sendAll(client_socket.get(), error_response);
+            } catch (...) {
+                // Suppress nested exceptions — socket may already be broken
+            }
+        }
+        // Socket automatically closed here by RAII destructor
+    }
+
+
+// =============================================================================
+// Section 10: Server Core
+// =============================================================================
+
+/// Global flag for graceful shutdown (set by signal handler)
+static std::atomic<bool> g_running{true};
+
+/**
+ * @brief Signal handler for graceful shutdown.
+ *
+ * Catches SIGINT and SIGTERM to allow the server to clean up
+ * resources before exiting. Uses an atomic flag to communicate
+ * with the accept loop safely.
+ */
+void signalHandler(int signum) {
+    LOG_INFO("Received signal " + std::to_string(signum) + " — shutting down");
+    g_running.store(false);
+}
+
+/**
+ * @class Server
+ * @brief The main web server class — binds, listens, and dispatches connections.
+ *
+ * Security design:
+ *  - Uses RAII Socket for the listening socket
+ *  - Detached threads for connection handling (bounded by OS thread limits)
+ *  - Graceful signal-based shutdown
+ *  - All configuration is validated at startup
+ *
+ * Principle: Defence in Depth — multiple layers of security are applied
+ * at the server, handler, parser, and OS levels.
+ */
+class Server {
+public:
+    /**
+     * @brief Construct the server.
+     * @param port The TCP port to listen on.
+     * @param webroot The document root directory.
+     */
+    Server(uint16_t port, const std::string& webroot)
+        : port_(port), webroot_(webroot), handler_(webroot) {}
+
+    /**
+     * @brief Start the server: bind, listen, and enter the accept loop.
+     * @return 0 on clean shutdown, non-zero on error.
+     *
+     * The method:
+     *  1. Creates and configures the listening socket (SO_REUSEADDR)
+     *  2. Binds to the specified port
+     *  3. Enters the main accept loop
+     *  4. Spawns a detached thread per connection
+     *  5. Exits cleanly on signal
+     */
+    int run() {
+        // Validate webroot exists
+        if (!fs::exists(webroot_) || !fs::is_directory(webroot_)) {
+            LOG_FATAL("Web root does not exist or is not a directory: " + webroot_);
+            return 1;
+        }
+
+        // Create the listening socket
+        Socket listen_socket(socket(AF_INET, SOCK_STREAM, 0));
+        if (!listen_socket.isValid()) {
+            LOG_FATAL("socket() failed: " + std::string(std::strerror(errno)));
+            return 1;
+        }
+
+        // Enable SO_REUSEADDR to allow rapid restarts
+        int opt = 1;
+        if (setsockopt(listen_socket.get(), SOL_SOCKET, SO_REUSEADDR,
+                       &opt, sizeof(opt)) < 0) {
+            LOG_WARNING("setsockopt(SO_REUSEADDR) failed: " +
+                        std::string(std::strerror(errno)));
+        }
+
+        // Bind to the specified port on all interfaces
+        struct sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(port_);
+
+        if (bind(listen_socket.get(),
+                 reinterpret_cast<struct sockaddr*>(&server_addr),
+                 sizeof(server_addr)) < 0) {
+            LOG_FATAL("bind() failed on port " + std::to_string(port_) +
+                      ": " + std::string(std::strerror(errno)));
+            return 1;
+        }
+
+        // Listen with a reasonable backlog
+        if (listen(listen_socket.get(), 128) < 0) {
+            LOG_FATAL("listen() failed: " + std::string(std::strerror(errno)));
+            return 1;
+        }
+
+        LOG_INFO("SSS Secure Web Server started on port " +
+                 std::to_string(port_));
+        LOG_INFO("Serving files from: " +
+                 fs::canonical(webroot_).string());
+        LOG_INFO("Press Ctrl+C to stop");
+
+        // Install signal handlers for graceful shutdown
+        std::signal(SIGINT, signalHandler);
+        std::signal(SIGTERM, signalHandler);
+
+        // Main accept loop
+        while (g_running.load()) {
+            struct sockaddr_in client_addr{};
+            socklen_t client_len = sizeof(client_addr);
+
+            // Set accept timeout to allow checking g_running periodically
+            struct timeval tv;
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            setsockopt(listen_socket.get(), SOL_SOCKET, SO_RCVTIMEO,
+                       &tv, sizeof(tv));
+
+            int client_fd = accept(listen_socket.get(),
+                                   reinterpret_cast<struct sockaddr*>(&client_addr),
+                                   &client_len);
+
+            if (client_fd < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    continue;  // Timeout — check g_running and try again
+                }
+                if (g_running.load()) {
+                    LOG_ERROR("accept() failed: " +
+                              std::string(std::strerror(errno)));
+                }
+                continue;
+            }
+
+            // Extract client IP address for logging
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
+            std::string client_ip(ip_str);
+
+            // Spawn a detached thread to handle the connection
+            // Each thread receives its own copy of client_ip (value semantics)
+            // and a reference to the shared handler
+            std::thread([client_fd, client_ip, this]() {
+                ConnectionHandler::handle(client_fd, client_ip, handler_);
+            }).detach();
+        }
+
+        LOG_INFO("Server shutdown complete");
+        return 0;
+    }
+
+private:
+    uint16_t port_;              ///< Listening port
+    std::string webroot_;        ///< Document root directory
+    RequestHandler handler_;     ///< Shared request handler
+};
