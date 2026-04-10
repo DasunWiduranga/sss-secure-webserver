@@ -1070,3 +1070,53 @@ private:
     std::string webroot_;        ///< Document root directory
     RequestHandler handler_;     ///< Shared request handler
 };
+
+// =============================================================================
+// Section 11: Entry Point
+// =============================================================================
+
+/**
+ * @brief Program entry point.
+ * @param argc Argument count.
+ * @param argv Argument vector: [port] [webroot]
+ * @return Exit status code.
+ *
+ * Validates command-line arguments, initialises the logger, and starts
+ * the server. Uses smart pointer (unique_ptr) for the Server instance
+ * to demonstrate RAII at the application level.
+ */
+int main(int argc, char* argv[]) {
+    // Parse command-line arguments with defaults
+    uint16_t port = 8080;
+    std::string webroot = "./www";
+
+    if (argc >= 2) {
+        try {
+            int p = std::stoi(argv[1]);
+            if (p < 1 || p > 65535) {
+                std::cerr << "Error: Port must be between 1 and 65535" << std::endl;
+                return 1;
+            }
+            port = static_cast<uint16_t>(p);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: Invalid port number: " << argv[1] << std::endl;
+            return 1;
+        }
+    }
+
+    if (argc >= 3) {
+        webroot = argv[2];
+    }
+
+    // Initialise logging
+    Logger::instance().setLevel(LogLevel::DEBUG);
+    Logger::instance().setLogFile("sss_server.log");
+
+    LOG_INFO("=== SSS Secure Web Server ===");
+    LOG_INFO("Configuration: port=" + std::to_string(port) +
+             " webroot=" + webroot);
+
+    // Create and run the server using smart pointer (RAII demonstration)
+    auto server = std::make_unique<Server>(port, webroot);
+    return server->run();
+}
