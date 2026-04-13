@@ -32,47 +32,28 @@
 
 namespace fs = std::filesystem;
 
-// =============================================================================
-// Section 1: Logging Subsystem
-// =============================================================================
+// Logging Subsystem
 
 /**
  * @enum LogLevel
  * @brief Severity levels for the logging subsystem.
  *
- * Security rationale: Structured logging supports the CSSLP principle of
+ * Structured logging supports the CSSLP principle of
  * Accountability and Auditing (Domain 1). All security-relevant events
  * are logged at appropriate severity levels to facilitate incident
  * investigation and compliance auditing.
  */
 enum class LogLevel {
-    DEBUG   = 0,  ///< Verbose debug information (development only)
-    INFO    = 1,  ///< Normal operational messages
-    WARNING = 2,  ///< Potentially harmful situations
-    ERROR   = 3,  ///< Error events that might still allow continued operation
-    FATAL   = 4   ///< Severe errors that will cause the server to abort
+    DEBUG   = 0,
+    INFO    = 1,
+    WARNING = 2,
+    ERROR   = 3,
+    FATAL   = 4
 };
 
-/**
- * @class Logger
- * @brief Thread-safe singleton logger with severity filtering.
- *
- * Security design: The logger uses a mutex to ensure thread safety,
- * preventing interleaved log messages that could obscure security events.
- * Log output goes to both stderr and a log file for persistence.
- *
- * Principle: US-CERT BSI - "Logging and Auditing" — all actions that
- * affect security state must be recorded.
- */
 class Logger {
 public:
-    /**
-     * @brief Get the singleton Logger instance.
-     * @return Reference to the global Logger.
-     *
-     * Uses Meyer's Singleton pattern — thread-safe in C++11 and later
-     * without requiring explicit synchronisation for initialisation.
-     */
+    
     static Logger& instance() {
         static Logger logger;
         return logger;
@@ -101,14 +82,6 @@ public:
         }
     }
 
-    /**
-     * @brief Write a log entry at the specified severity level.
-     * @param level The severity of the message.
-     * @param message The log message content.
-     *
-     * Format: [YYYY-MM-DD HH:MM:SS] [LEVEL] message
-     * Messages below the configured minimum level are silently discarded.
-     */
     void log(LogLevel level, const std::string& message) {
         if (level < min_level_) return;
 
@@ -159,9 +132,9 @@ private:
         }
     }
 
-    std::mutex mutex_;              ///< Guards all log output operations
-    std::ofstream log_file_;        ///< Persistent log file stream
-    LogLevel min_level_;            ///< Minimum severity for output
+    std::mutex mutex_;
+    std::ofstream log_file_;
+    LogLevel min_level_;
 };
 
 /// Convenience macros for logging at each severity level
@@ -171,10 +144,95 @@ private:
 #define LOG_ERROR(msg)   Logger::instance().log(LogLevel::ERROR, msg)
 #define LOG_FATAL(msg)   Logger::instance().log(LogLevel::FATAL, msg)
 
-// =============================================================================
-// Section 3: HTTP Request/Response Structures
-// =============================================================================
- 
+
+// RAII Socket Wrapper
+
+/**
+ * @class Socket
+ * @brief RAII wrapper for POSIX file descriptors (sockets).
+ *
+ * Implements the RAII idiom to guarantee that socket
+ * file descriptors are closed when the Socket object goes out of scope,
+ * even in the presence of exceptions. This prevents resource leaks that
+ * could lead to file descriptor exhaustion (denial of service).
+ *
+ * Principle: CSSLP Domain 4 — "Secure Design" — use RAII to ensure
+ * deterministic resource cleanup and prevent resource exhaustion attacks.
+ *
+ * The class is move-only (non-copyable) to enforce unique ownership
+ * semantics, similar to std::unique_ptr.
+ */
+class Socket {
+public:
+    /**
+     * @brief Construct a Socket wrapping an existing file descriptor.
+     * @param fd The raw file descriptor to manage. -1 indicates invalid.
+     */
+    explicit Socket(int fd = -1) : fd_(fd) {}
+
+    /// Destructor closes the file descriptor if valid
+    ~Socket() {
+        close();
+    }
+
+    // Move semantics - transfer ownership
+    Socket(Socket&& other) noexcept : fd_(other.fd_) {
+        other.fd_ = -1;
+    }
+
+    Socket& operator=(Socket&& other) noexcept {
+        if (this != &other) {
+            close();
+            fd_ = other.fd_;
+            other.fd_ = -1;
+        }
+        return *this;
+    }
+
+    // Non-copyable - enforce unique ownership of the file descriptor
+    Socket(const Socket&) = delete;
+    Socket& operator=(const Socket&) = delete;
+
+    /** @brief Get the raw file descriptor. */
+    int get() const { return fd_; }
+
+    /** @brief Check whether the socket holds a valid file descriptor. */
+    bool isValid() const { return fd_ >= 0; }
+
+    /**
+     * @brief Release ownership of the file descriptor without closing it.
+     * @return The raw file descriptor.
+     *
+     * The caller assumes responsibility for closing the descriptor.
+     */
+    int release() {
+        int fd = fd_;
+        fd_ = -1;
+        return fd;
+    }
+
+    /**
+     * @brief Close the managed file descriptor.
+     *
+     * Logs a warning if close() fails, as this may indicate a bug
+     * or resource corruption.
+     */
+    void close() {
+        if (fd_ >= 0) {
+            if (::close(fd_) < 0) {
+                LOG_WARNING("Failed to close fd " + std::to_string(fd_) +
+                            ": " + std::strerror(errno));
+            }
+            fd_ = -1;
+        }
+    }
+
+private:
+    int fd_;
+};
+
+// HTTP Request/Response Structures
+
 /**
  * @struct HttpRequest
  * @brief Parsed representation of an incoming HTTP request.
@@ -184,33 +242,25 @@ private:
  * prevent buffer exhaustion attacks.
  */
 struct HttpRequest {
-    std::string method;                              ///< HTTP method (GET, POST, etc.)
-    std::string path;                                ///< Request URI path (validated)
-    std::string version;                             ///< HTTP version string
-    std::map<std::string, std::string> headers;      ///< Parsed request headers
-    std::string body;                                ///< Request body (for POST)
-    std::map<std::string, std::string> query_params;  ///< Parsed query string parameters
-    std::map<std::string, std::string> form_data;     ///< Parsed form POST data
+    std::string method;
+    std::string path;
+    std::string version;
+    std::map<std::string, std::string> headers;
+    std::string body;
+    std::map<std::string, std::string> query_params;
+    std::map<std::string, std::string> form_data;
 };
- 
+
 /**
  * @struct HttpResponse
  * @brief Represents an HTTP response to be sent to the client.
  */
 struct HttpResponse {
-    int status_code = 200;                           ///< HTTP status code
-    std::string status_text = "OK";                  ///< Status reason phrase
-    std::map<std::string, std::string> headers;      ///< Response headers
-    std::string body;                                ///< Response body content
- 
-    /**
-     * @brief Serialise the response to a raw HTTP response string.
-     * @return The complete HTTP response ready for transmission.
-     *
-     * Security: Always includes security-relevant headers such as
-     * Content-Length (to prevent response splitting) and
-     * X-Content-Type-Options (to prevent MIME-sniffing).
-     */
+    int status_code = 200;
+    std::string status_text = "OK";
+    std::map<std::string, std::string> headers;
+    std::string body;
+
     std::string serialize() const {
         std::ostringstream oss;
         oss << "HTTP/1.1 " << status_code << " " << status_text << "\r\n";
@@ -224,57 +274,26 @@ struct HttpResponse {
     }
 };
 
-// =============================================================================
-// Section 4: Input Validation and Sanitisation
-// =============================================================================
- 
-/**
- * @class InputValidator
- * @brief Static utility class for validating and sanitising all untrusted input.
- *
- * Security rationale: All data received from the TCP socket is untrusted.
- * This class centralises validation logic, applying the CSSLP principle of
- * "Complete Mediation" — every access to a resource must be validated.
- *
- * Key defences:
- *  - Path traversal prevention (CWE-22)
- *  - Request size limiting (CWE-400)
- *  - Header injection prevention (CWE-113)
- *  - Null byte injection prevention (CWE-158)
- */
+
+// Input Validation and Sanitisation
+
 class InputValidator {
 public:
     /// Maximum allowed size for an HTTP request (headers + body) in bytes
-    static constexpr size_t MAX_REQUEST_SIZE = 1 * 1024 * 1024;  // 1 MB
- 
+    static constexpr size_t MAX_REQUEST_SIZE = 1 * 1024 * 1024;
+
     /// Maximum allowed length for a URI path
     static constexpr size_t MAX_URI_LENGTH = 2048;
- 
+
     /// Maximum allowed size for a single HTTP header value
     static constexpr size_t MAX_HEADER_SIZE = 8192;
- 
+
     /// Maximum number of headers per request
     static constexpr size_t MAX_HEADER_COUNT = 100;
- 
+
     /// Maximum POST body size
     static constexpr size_t MAX_BODY_SIZE = 512 * 1024;  // 512 KB
- 
-    /**
-     * @brief Validate and sanitise a URI path against path traversal attacks.
-     * @param path The raw URI path from the HTTP request.
-     * @param webroot The server's document root directory.
-     * @return The resolved canonical filesystem path, or empty string if invalid.
-     *
-     * Defence against CWE-22 (Path Traversal):
-     *  1. Reject paths containing null bytes
-     *  2. URL-decode the path
-     *  3. Reject encoded traversal sequences (double-encoding attacks)
-     *  4. Resolve to canonical (absolute) path using std::filesystem
-     *  5. Verify the canonical path starts with the webroot
-     *
-     * This implements the OWASP recommendation of canonicalisation followed
-     * by prefix checking, which is more robust than blacklist filtering.
-     */
+
     static std::string sanitizePath(const std::string& path,
                                      const std::string& webroot) {
         // Reject null bytes — prevents CWE-158 null byte injection
@@ -282,37 +301,37 @@ public:
             LOG_WARNING("Null byte detected in request path — rejected");
             return "";
         }
- 
+
         // Reject excessively long URIs
         if (path.length() > MAX_URI_LENGTH) {
             LOG_WARNING("URI exceeds maximum length — rejected");
             return "";
         }
- 
+
         // URL-decode the path
         std::string decoded = urlDecode(path);
- 
+
         // After decoding, check again for traversal patterns
         // This catches double-encoding attacks (%252e%252e%252f)
         if (decoded.find("..") != std::string::npos) {
             LOG_WARNING("Path traversal sequence detected after decoding: " + decoded);
             return "";
         }
- 
+
         // Build the candidate path relative to webroot
         // Default "/" to "/index.html"
         std::string relative = (decoded == "/") ? "/index.html" : decoded;
- 
+
         // Remove leading slash for path concatenation
         if (!relative.empty() && relative[0] == '/') {
             relative = relative.substr(1);
         }
- 
+
         try {
             // Canonicalise using std::filesystem
             fs::path candidate = fs::canonical(fs::path(webroot) / relative);
             fs::path root = fs::canonical(fs::path(webroot));
- 
+
             // Verify the resolved path is within the webroot
             // This is the critical check that prevents path traversal
             std::string cand_str = candidate.string();
@@ -322,7 +341,7 @@ public:
                             " resolved to " + cand_str);
                 return "";
             }
- 
+
             return cand_str;
         } catch (const fs::filesystem_error& e) {
             // File does not exist or permission denied
@@ -330,12 +349,7 @@ public:
             return "";
         }
     }
- 
-    /**
-     * @brief URL-decode a percent-encoded string.
-     * @param str The URL-encoded input string.
-     * @return The decoded string.
-     */
+
     static std::string urlDecode(const std::string& str) {
         std::string result;
         result.reserve(str.size());
@@ -347,7 +361,7 @@ public:
                     result += c;
                     i += 2;
                 } catch (...) {
-                    result += str[i];  // Invalid encoding — keep literal '%'
+                    result += str[i];  // Invalid encoding - keep literal '%'
                 }
             } else if (str[i] == '+') {
                 result += ' ';  // Form encoding: '+' represents space
@@ -357,12 +371,8 @@ public:
         }
         return result;
     }
- 
-    /**
-     * @brief Parse URL-encoded form data (application/x-www-form-urlencoded).
-     * @param body The raw form body.
-     * @return Map of key-value pairs, URL-decoded.
-     */
+
+    
     static std::map<std::string, std::string> parseFormData(const std::string& body) {
         std::map<std::string, std::string> params;
         std::istringstream stream(body);
@@ -382,42 +392,143 @@ public:
         }
         return params;
     }
- 
-    /**
-     * @brief Parse query string parameters from a URI.
-     * @param query The query string (after '?').
-     * @return Map of decoded key-value pairs.
-     */
+
     static std::map<std::string, std::string> parseQueryString(const std::string& query) {
         return parseFormData(query);  // Same encoding format
     }
- 
-    /**
-     * @brief Validate an HTTP method string.
-     * @param method The method extracted from the request line.
-     * @return true if the method is supported and well-formed.
-     *
-     * Security: Only allows explicitly supported methods. Unknown
-     * methods are rejected (fail-safe default / deny-by-default).
-     */
+
     static bool isValidMethod(const std::string& method) {
         return method == "GET" || method == "POST" ||
                method == "HEAD" || method == "OPTIONS";
     }
 };
 
-// =============================================================================
-// Section 6: MIME Type Detection
-// =============================================================================
- 
-/**
- * @class MimeTypes
- * @brief Maps file extensions to MIME type strings.
- *
- * Security note: Correct MIME typing prevents browsers from
- * misinterpreting content. Combined with X-Content-Type-Options: nosniff,
- * this mitigates content-type sniffing attacks (CWE-16).
- */
+
+// HTTP Request Parser
+
+class HttpParser {
+public:
+    
+    static HttpRequest parse(const std::string& raw) {
+        HttpRequest request;
+
+        // Enforce maximum request size — defence against CWE-400
+        if (raw.size() > InputValidator::MAX_REQUEST_SIZE) {
+            LOG_WARNING("Request exceeds maximum size limit");
+            return request;
+        }
+
+        std::istringstream stream(raw);
+        std::string line;
+
+        // --- Parse the request line ---
+        if (!std::getline(stream, line)) {
+            LOG_WARNING("Empty request received");
+            return request;
+        }
+
+        // Remove trailing \r if present (HTTP uses \r\n line endings)
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        std::istringstream request_line(line);
+        request_line >> request.method >> request.path >> request.version;
+
+        // Validate the HTTP method
+        if (!InputValidator::isValidMethod(request.method)) {
+            LOG_WARNING("Invalid HTTP method: " + request.method);
+            request.method.clear();
+            return request;
+        }
+
+        // Extract query string from URI
+        auto query_pos = request.path.find('?');
+        if (query_pos != std::string::npos) {
+            std::string query = request.path.substr(query_pos + 1);
+            request.path = request.path.substr(0, query_pos);
+            request.query_params = InputValidator::parseQueryString(query);
+        }
+
+        // --- Parse headers ---
+        size_t header_count = 0;
+        while (std::getline(stream, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            if (line.empty()) break;  // End of headers
+
+            if (++header_count > InputValidator::MAX_HEADER_COUNT) {
+                LOG_WARNING("Too many headers in request — truncating");
+                break;
+            }
+
+            auto colon_pos = line.find(':');
+            if (colon_pos != std::string::npos) {
+                std::string key = line.substr(0, colon_pos);
+                std::string value = line.substr(colon_pos + 1);
+
+                // Trim leading whitespace from header value
+                size_t start = value.find_first_not_of(" \t");
+                if (start != std::string::npos) {
+                    value = value.substr(start);
+                }
+
+                // Enforce header value size limit
+                if (value.size() > InputValidator::MAX_HEADER_SIZE) {
+                    LOG_WARNING("Oversized header value for: " + key);
+                    value = value.substr(0, InputValidator::MAX_HEADER_SIZE);
+                }
+
+                // Convert header name to lowercase for consistent lookup
+                std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+                request.headers[key] = value;
+            }
+        }
+
+        // --- Extract body ---
+        auto cl_it = request.headers.find("content-length");
+        if (cl_it != request.headers.end()) {
+            try {
+                size_t content_length = std::stoul(cl_it->second);
+
+                // Enforce body size limit
+                if (content_length > InputValidator::MAX_BODY_SIZE) {
+                    LOG_WARNING("Request body exceeds maximum size");
+                    content_length = InputValidator::MAX_BODY_SIZE;
+                }
+
+                // Read the body
+                std::string remaining;
+                std::getline(stream, remaining, '\0');
+                if (remaining.size() > content_length) {
+                    request.body = remaining.substr(0, content_length);
+                } else {
+                    request.body = remaining;
+                }
+            } catch (const std::exception& e) {
+                LOG_WARNING("Invalid Content-Length header: " +
+                            std::string(e.what()));
+            }
+        }
+
+        // --- Parse form data for POST with URL-encoded content ---
+        auto ct_it = request.headers.find("content-type");
+        if (request.method == "POST" && ct_it != request.headers.end()) {
+            if (ct_it->second.find("application/x-www-form-urlencoded") !=
+                std::string::npos) {
+                request.form_data = InputValidator::parseFormData(request.body);
+            }
+        }
+
+        LOG_DEBUG("Parsed request: " + request.method + " " + request.path);
+        return request;
+    }
+};
+
+
+// MIME Type Detection
+
 class MimeTypes {
 public:
     /**
@@ -444,11 +555,11 @@ public:
             {".woff", "font/woff"},
             {".woff2","font/woff2"},
         };
- 
+
         fs::path p(path);
         std::string ext = p.extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
- 
+
         auto it = types.find(ext);
         if (it != types.end()) {
             return it->second;
@@ -458,45 +569,11 @@ public:
     }
 };
 
-// =============================================================================
-// Section 7: Sandboxed Form Handler (Forked Process with seccomp)
-// =============================================================================
+// Sandboxed Form Handler (Forked Process with seccomp)
 
-/**
- * @class FormHandler
- * @brief Processes form submissions in an isolated child process.
- *
- * Security rationale: Form data originates from untrusted users and
- * may contain malicious payloads. Processing it in a forked child
- * process achieves:
- *  1. Process-level isolation — a crash in the handler cannot
- *     affect the main server process (separation of concerns).
- *  2. Privilege reduction — the child drops capabilities.
- *  3. Syscall filtering via seccomp-bpf — the child is restricted
- *     to only the system calls needed for its task (write, exit).
- *
- * Principle: CSSLP Domain 4 — "Separation of Privileges" and
- * US-CERT BSI — "Least Privilege" / "Attack Surface Reduction".
- *
- * The assignment brief recommends handling form submissions via a
- * separate process with increased isolation. This class implements
- * that recommendation using fork() + seccomp.
- */
 class FormHandler {
 public:
-    /**
-     * @brief Handle a form submission in a sandboxed child process.
-     * @param form_data The parsed form key-value pairs.
-     * @param storage_path Path to the directory where submissions are stored.
-     * @return true if the handler was spawned successfully.
-     *
-     * The method forks a child process. The child:
-     *  1. Installs a seccomp-bpf filter to whitelist only essential syscalls.
-     *  2. Writes the form data to a timestamped file.
-     *  3. Exits immediately.
-     *
-     * The parent reaps the child via waitpid() to prevent zombies.
-     */
+    
     static bool handle(const std::map<std::string, std::string>& form_data,
                        const std::string& storage_path) {
         LOG_INFO("Spawning sandboxed form handler process");
@@ -571,20 +648,52 @@ public:
         }
     }
 
-// =============================================================================
-// Section 8: Request Router and Response Builder
-// =============================================================================
- 
-/**
- * @class RequestHandler
- * @brief Routes HTTP requests and constructs appropriate responses.
- *
- * Security design:
- *  - All file serving goes through InputValidator::sanitizePath()
- *  - Security headers are added to every response (defence in depth)
- *  - Error responses reveal minimal information (fail-safe defaults)
- *  - POST form handling is delegated to the sandboxed FormHandler
- */
+private:
+    static void applySandbox() {
+        scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL);
+        if (ctx == nullptr) {
+            _exit(2);
+        }
+
+        // Allow only essential syscalls for clean exit
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit_group), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(write), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(close), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigreturn), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(brk), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mmap), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(munmap), 0);
+
+        if (seccomp_load(ctx) < 0) {
+            seccomp_release(ctx);
+            _exit(3);
+        }
+
+        seccomp_release(ctx);
+    }
+
+    /**
+     * @brief Remove control characters from a string for safe storage.
+     * @param input The raw string to sanitise.
+     * @return A sanitised copy with control characters replaced by spaces.
+     */
+    static std::string sanitizeForStorage(const std::string& input) {
+        std::string result;
+        result.reserve(input.size());
+        for (char c : input) {
+            if (c >= 32 && c < 127) {  // Printable ASCII only
+                result += c;
+            } else {
+                result += ' ';
+            }
+        }
+        return result;
+    }
+};
+
+// Request Router and Response Builder
+
 class RequestHandler {
 public:
     /**
@@ -594,7 +703,7 @@ public:
     explicit RequestHandler(const std::string& webroot)
         : webroot_(webroot),
           submissions_dir_(webroot + "/../submissions") {}
- 
+
     /**
      * @brief Process an HTTP request and produce a response.
      * @param request The parsed HTTP request.
@@ -603,11 +712,11 @@ public:
     HttpResponse handleRequest(const HttpRequest& request) {
         HttpResponse response;
         addSecurityHeaders(response);
- 
+
         if (request.method.empty()) {
             return buildErrorResponse(400, "Bad Request");
         }
- 
+
         // Route based on HTTP method
         if (request.method == "GET" || request.method == "HEAD") {
             return handleGet(request);
@@ -620,7 +729,7 @@ public:
             addSecurityHeaders(response);
             return response;
         }
- 
+
         return buildErrorResponse(405, "Method Not Allowed");
     }
 
@@ -673,14 +782,6 @@ private:
         return response;
     }
 
-    /**
-     * @brief Handle a POST request (form submission).
-     * @param request The parsed POST request.
-     * @return An HttpResponse confirming or denying the submission.
-     *
-     * Form data is processed by FormHandler in a sandboxed child process.
-     * The response contains minimal information to avoid information leakage.
-     */
     HttpResponse handlePost(const HttpRequest& request) {
         // Check for form data
         if (request.form_data.empty() && request.query_params.empty()) {
@@ -713,15 +814,6 @@ private:
         }
     }
 
-    /**
-     * @brief Build an HTML error response.
-     * @param code The HTTP status code.
-     * @param text The status reason phrase.
-     * @return An HttpResponse with a safe error page.
-     *
-     * Security: Error pages are static HTML templates that do not
-     * reflect any user input (prevents reflected XSS via error pages).
-     */
     HttpResponse buildErrorResponse(int code, const std::string& text) {
         HttpResponse response;
         response.status_code = code;
@@ -736,18 +828,7 @@ private:
         return response;
     }
 
-    /**
-     * @brief Add security-relevant HTTP headers to a response.
-     * @param response The response to augment.
-     *
-     * Headers applied (defence in depth):
-     *  - X-Content-Type-Options: nosniff — prevent MIME-sniffing
-     *  - X-Frame-Options: DENY — prevent clickjacking
-     *  - X-XSS-Protection: 0 — modern recommendation (CSP preferred)
-     *  - Content-Security-Policy: restrict resource loading
-     *  - Referrer-Policy: limit referrer information leakage
-     *  - Server: generic banner (information hiding)
-     */
+    
     void addSecurityHeaders(HttpResponse& response) {
         response.headers["X-Content-Type-Options"] = "nosniff";
         response.headers["X-Frame-Options"] = "DENY";
@@ -761,40 +842,12 @@ private:
     std::string submissions_dir_;  ///< Form submission storage directory
 };
 
-// =============================================================================
-// Section 9: Connection Handler (Per-Thread)
-// =============================================================================
 
-/**
- * @class ConnectionHandler
- * @brief Handles a single client connection on a dedicated thread.
- *
- * Security rationale: Each connection is handled on its own thread with
- * its own stack. This achieves:
- *  - Isolation: A crash or exception handling one connection does not
- *    affect other connections (fault isolation / separation of concerns).
- *  - Resource containment: Each thread's resources are bounded.
- *
- * The RAII Socket wrapper ensures the client socket is closed even if
- * an exception occurs during request processing.
- *
- * Principle: CSSLP Domain 4 — "Separation of Concerns / Isolation"
- */
+// Connection Handler (Per-Thread)
+
 class ConnectionHandler {
 public:
-    /**
-     * @brief Handle a client connection.
-     * @param client_fd The client socket file descriptor (ownership transferred).
-     * @param client_addr The client's IP address string (for logging).
-     * @param handler Reference to the shared RequestHandler.
-     *
-     * This method:
-     *  1. Wraps the fd in an RAII Socket
-     *  2. Reads the request with a timeout and size limit
-     *  3. Parses and handles the request
-     *  4. Sends the response
-     *  5. Closes the socket (automatic via RAII)
-     */
+    
     static void handle(int client_fd, const std::string& client_addr,
                        RequestHandler& handler) {
         // RAII: Socket will be closed when this function returns
@@ -916,9 +969,8 @@ private:
     }
 };
 
-// =============================================================================
-// Section 10: Server Core
-// =============================================================================
+
+// Server Core
 
 /// Global flag for graceful shutdown (set by signal handler)
 static std::atomic<bool> g_running{true};
@@ -935,19 +987,7 @@ void signalHandler(int signum) {
     g_running.store(false);
 }
 
-/**
- * @class Server
- * @brief The main web server class — binds, listens, and dispatches connections.
- *
- * Security design:
- *  - Uses RAII Socket for the listening socket
- *  - Detached threads for connection handling (bounded by OS thread limits)
- *  - Graceful signal-based shutdown
- *  - All configuration is validated at startup
- *
- * Principle: Defence in Depth — multiple layers of security are applied
- * at the server, handler, parser, and OS levels.
- */
+
 class Server {
 public:
     /**
@@ -958,17 +998,7 @@ public:
     Server(uint16_t port, const std::string& webroot)
         : port_(port), webroot_(webroot), handler_(webroot) {}
 
-    /**
-     * @brief Start the server: bind, listen, and enter the accept loop.
-     * @return 0 on clean shutdown, non-zero on error.
-     *
-     * The method:
-     *  1. Creates and configures the listening socket (SO_REUSEADDR)
-     *  2. Binds to the specified port
-     *  3. Enters the main accept loop
-     *  4. Spawns a detached thread per connection
-     *  5. Exits cleanly on signal
-     */
+    
     int run() {
         // Validate webroot exists
         if (!fs::exists(webroot_) || !fs::is_directory(webroot_)) {
@@ -1071,20 +1101,10 @@ private:
     RequestHandler handler_;     ///< Shared request handler
 };
 
-// =============================================================================
-// Section 11: Entry Point
-// =============================================================================
 
-/**
- * @brief Program entry point.
- * @param argc Argument count.
- * @param argv Argument vector: [port] [webroot]
- * @return Exit status code.
- *
- * Validates command-line arguments, initialises the logger, and starts
- * the server. Uses smart pointer (unique_ptr) for the Server instance
- * to demonstrate RAII at the application level.
- */
+// Entry Point
+
+
 int main(int argc, char* argv[]) {
     // Parse command-line arguments with defaults
     uint16_t port = 8080;
