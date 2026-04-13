@@ -4,50 +4,64 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SSS Secure Web Server</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
-        h1 { color: #2c3e50; }
-        .card { background: white; padding: 20px; border-radius: 8px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        form { display: flex; flex-direction: column; gap: 10px; }
-        label { font-weight: bold; color: #34495e; }
-        input, textarea { padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
-        button { background: #2c3e50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-        button:hover { background: #34495e; }
-        a { color: #2980b9; }
-    </style>
+    <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <h1>SSS Secure Web Server</h1>
-    <p>Welcome to the SalforSec Soft (SSS) Ltd. secure web server prototype.</p>
 
-    <div class="card">
-        <h2>About</h2>
-        <p>This server demonstrates secure-by-design principles including RAII resource management,
-           input validation, path traversal prevention, sandboxed form handling, and structured logging.</p>
+    <h1><span>SSS</span> Secure Web Server</h1>
+    <p class="tagline">SalforSec Soft Ltd. — Prototype v1.0</p>
+
+    <h2>Security Features</h2>
+    <div class="features">
+        <div class="feature">
+            <strong>RAII Resource Safety</strong>
+            <span>Socket and memory resources managed via destructors and smart pointers.</span>
+        </div>
+        <div class="feature">
+            <strong>Input Validation</strong>
+            <span>Path traversal, null bytes, and oversized requests rejected at the parser.</span>
+        </div>
+        <div class="feature">
+            <strong>Process Sandboxing</strong>
+            <span>Form handling in a forked process with seccomp-bpf syscall filtering.</span>
+        </div>
+        <div class="feature">
+            <strong>Audit Logging</strong>
+            <span>Thread-safe logging at five severity levels for forensic analysis.</span>
+        </div>
     </div>
 
-    <div class="card">
-        <h2>Contact Form (POST Demo)</h2>
+    <h2>Contact Form (POST)</h2>
+    <div class="form-section">
+        <p>Submissions are processed in a sandboxed child process and saved to disk.</p>
         <form method="POST" action="/submit">
-            <label for="name">Name:</label>
-            <input type="text" id="name" name="name" required>
-
-            <label for="email">Email:</label>
-            <input type="email" id="email" name="email" required>
-
-            <label for="message">Message:</label>
-            <textarea id="message" name="message" rows="4" required></textarea>
-
+            <div class="row">
+                <div class="field">
+                    <label for="name">Name</label>
+                    <input type="text" id="name" name="name" required>
+                </div>
+                <div class="field">
+                    <label for="email">Email</label>
+                    <input type="email" id="email" name="email" required>
+                </div>
+            </div>
+            <div class="field">
+                <label for="message">Message</label>
+                <textarea id="message" name="message" required></textarea>
+            </div>
             <button type="submit">Submit</button>
         </form>
     </div>
 
-    <div class="card">
-        <h2>Test Pages</h2>
-        <ul>
-            <li><a href="/about.html">About Page</a></li>
-            <li><a href="/subdir/nested.html">Nested Subdirectory Page</a></li>
-        </ul>
+    <h2>Pages</h2>
+    <div class="links">
+        <a href="/about.html">About Page</a>
+        <a href="/subdir/nested.html">Nested Subdirectory Page</a>
     </div>
+
+    <div class="footer">
+        &copy; 2026 SalforSec Soft (SSS) Ltd.
+    </div>
+
 </body>
 </html>
