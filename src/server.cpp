@@ -34,15 +34,6 @@ namespace fs = std::filesystem;
 
 // Logging Subsystem
 
-/**
- * @enum LogLevel
- * @brief Severity levels for the logging subsystem.
- *
- * Structured logging supports the CSSLP principle of
- * Accountability and Auditing (Domain 1). All security-relevant events
- * are logged at appropriate severity levels to facilitate incident
- * investigation and compliance auditing.
- */
 enum class LogLevel {
     DEBUG   = 0,
     INFO    = 1,
@@ -147,21 +138,6 @@ private:
 
 // RAII Socket Wrapper
 
-/**
- * @class Socket
- * @brief RAII wrapper for POSIX file descriptors (sockets).
- *
- * Implements the RAII idiom to guarantee that socket
- * file descriptors are closed when the Socket object goes out of scope,
- * even in the presence of exceptions. This prevents resource leaks that
- * could lead to file descriptor exhaustion (denial of service).
- *
- * Principle: CSSLP Domain 4 — "Secure Design" — use RAII to ensure
- * deterministic resource cleanup and prevent resource exhaustion attacks.
- *
- * The class is move-only (non-copyable) to enforce unique ownership
- * semantics, similar to std::unique_ptr.
- */
 class Socket {
 public:
     /**
@@ -175,7 +151,7 @@ public:
         close();
     }
 
-    // Move semantics - transfer ownership
+    // Move semantics — transfer ownership
     Socket(Socket&& other) noexcept : fd_(other.fd_) {
         other.fd_ = -1;
     }
@@ -189,7 +165,7 @@ public:
         return *this;
     }
 
-    // Non-copyable - enforce unique ownership of the file descriptor
+    // Non-copyable — enforce unique ownership of the file descriptor
     Socket(const Socket&) = delete;
     Socket& operator=(const Socket&) = delete;
 
@@ -228,19 +204,12 @@ public:
     }
 
 private:
-    int fd_;
+    int fd_;  ///< The managed POSIX file descriptor
 };
+
 
 // HTTP Request/Response Structures
 
-/**
- * @struct HttpRequest
- * @brief Parsed representation of an incoming HTTP request.
- *
- * Security note: All fields are populated by the parser after input
- * validation. The parser enforces maximum sizes on each field to
- * prevent buffer exhaustion attacks.
- */
 struct HttpRequest {
     std::string method;
     std::string path;
@@ -274,13 +243,13 @@ struct HttpResponse {
     }
 };
 
-
 // Input Validation and Sanitisation
+
 
 class InputValidator {
 public:
     /// Maximum allowed size for an HTTP request (headers + body) in bytes
-    static constexpr size_t MAX_REQUEST_SIZE = 1 * 1024 * 1024;
+    static constexpr size_t MAX_REQUEST_SIZE = 1 * 1024 * 1024;  // 1 MB
 
     /// Maximum allowed length for a URI path
     static constexpr size_t MAX_URI_LENGTH = 2048;
@@ -350,6 +319,11 @@ public:
         }
     }
 
+    /**
+     * @brief URL-decode a percent-encoded string.
+     * @param str The URL-encoded input string.
+     * @return The decoded string.
+     */
     static std::string urlDecode(const std::string& str) {
         std::string result;
         result.reserve(str.size());
@@ -361,7 +335,7 @@ public:
                     result += c;
                     i += 2;
                 } catch (...) {
-                    result += str[i];  // Invalid encoding - keep literal '%'
+                    result += str[i];  // Invalid encoding — keep literal '%'
                 }
             } else if (str[i] == '+') {
                 result += ' ';  // Form encoding: '+' represents space
@@ -372,7 +346,11 @@ public:
         return result;
     }
 
-    
+    /**
+     * @brief Parse URL-encoded form data (application/x-www-form-urlencoded).
+     * @param body The raw form body.
+     * @return Map of key-value pairs, URL-decoded.
+     */
     static std::map<std::string, std::string> parseFormData(const std::string& body) {
         std::map<std::string, std::string> params;
         std::istringstream stream(body);
@@ -393,10 +371,23 @@ public:
         return params;
     }
 
+    /**
+     * @brief Parse query string parameters from a URI.
+     * @param query The query string (after '?').
+     * @return Map of decoded key-value pairs.
+     */
     static std::map<std::string, std::string> parseQueryString(const std::string& query) {
         return parseFormData(query);  // Same encoding format
     }
 
+    /**
+     * @brief Validate an HTTP method string.
+     * @param method The method extracted from the request line.
+     * @return true if the method is supported and well-formed.
+     *
+     * Security: Only allows explicitly supported methods. Unknown
+     * methods are rejected (fail-safe default / deny-by-default).
+     */
     static bool isValidMethod(const std::string& method) {
         return method == "GET" || method == "POST" ||
                method == "HEAD" || method == "OPTIONS";
@@ -649,6 +640,7 @@ public:
     }
 
 private:
+    
     static void applySandbox() {
         scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL);
         if (ctx == nullptr) {
@@ -734,11 +726,7 @@ public:
     }
 
 private:
-    /**
-     * @brief Handle a GET request by serving the requested file.
-     * @param request The parsed GET request.
-     * @return An HttpResponse containing the file contents or an error.
-     */
+    
     HttpResponse handleGet(const HttpRequest& request) {
         // Validate and resolve the file path (path traversal defence)
         std::string filepath = InputValidator::sanitizePath(request.path, webroot_);
@@ -782,6 +770,7 @@ private:
         return response;
     }
 
+    
     HttpResponse handlePost(const HttpRequest& request) {
         // Check for form data
         if (request.form_data.empty() && request.query_params.empty()) {
@@ -828,20 +817,18 @@ private:
         return response;
     }
 
-    
     void addSecurityHeaders(HttpResponse& response) {
         response.headers["X-Content-Type-Options"] = "nosniff";
         response.headers["X-Frame-Options"] = "DENY";
         response.headers["X-XSS-Protection"] = "0";
-        response.headers["Content-Security-Policy"] = "default-src 'self'";
+        response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'";
         response.headers["Referrer-Policy"] = "no-referrer";
         response.headers["Server"] = "SSS-Secure/1.0";
     }
 
-    std::string webroot_;          ///< Document root directory
-    std::string submissions_dir_;  ///< Form submission storage directory
+    std::string webroot_;
+    std::string submissions_dir_;
 };
-
 
 // Connection Handler (Per-Thread)
 
@@ -946,14 +933,6 @@ private:
         return data;
     }
 
-    /**
-     * @brief Send all data through a socket, handling partial writes.
-     * @param fd The socket file descriptor.
-     * @param data The data to send.
-     *
-     * Loops on send() to handle short writes, which can occur under
-     * high load or when the kernel send buffer is full.
-     */
     static void sendAll(int fd, const std::string& data) {
         size_t total_sent = 0;
         while (total_sent < data.size()) {
@@ -987,7 +966,6 @@ void signalHandler(int signum) {
     g_running.store(false);
 }
 
-
 class Server {
 public:
     /**
@@ -998,7 +976,6 @@ public:
     Server(uint16_t port, const std::string& webroot)
         : port_(port), webroot_(webroot), handler_(webroot) {}
 
-    
     int run() {
         // Validate webroot exists
         if (!fs::exists(webroot_) || !fs::is_directory(webroot_)) {
@@ -1096,14 +1073,12 @@ public:
     }
 
 private:
-    uint16_t port_;              ///< Listening port
-    std::string webroot_;        ///< Document root directory
-    RequestHandler handler_;     ///< Shared request handler
+    uint16_t port_;
+    std::string webroot_;
+    RequestHandler handler_;
 };
 
-
 // Entry Point
-
 
 int main(int argc, char* argv[]) {
     // Parse command-line arguments with defaults
